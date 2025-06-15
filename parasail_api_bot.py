@@ -81,7 +81,7 @@ class ParasailNodeBot:
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         print(f"[{timestamp}] {message}")
 
-    async def _send_api_request(self, method, endpoint, data=None, headers=None, retry_count=0):
+    async def _send_api_request(self, method, endpoint, json_data=None, params=None, headers=None, retry_count=0):
         url = f"{BASE_URL}{endpoint}"
         _headers = {"Content-Type": "application/json"}
         if self.config.get("bearer_token"):
@@ -91,9 +91,9 @@ class ParasailNodeBot:
 
         try:
             if method == 'GET':
-                response = requests.get(url, headers=_headers, timeout=10) # Added timeout
+                response = requests.get(url, headers=_headers, params=params, timeout=10) # Pass params for GET
             elif method == 'POST':
-                response = requests.post(url, headers=_headers, json=data, timeout=10) # Added timeout
+                response = requests.post(url, headers=_headers, json=json_data, timeout=10) # Pass json_data for POST
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
 
@@ -109,7 +109,7 @@ class ParasailNodeBot:
                     self.log(f"Response body: {e.response.text.strip()[:200]}...") # Log part of response
                     self.log(f"Retrying in {wait_time:.2f} seconds (attempt {retry_count + 1}/{self.max_retries})...")
                     await asyncio.sleep(wait_time)
-                    return await self._send_api_request(method, endpoint, data, headers, retry_count + 1)
+                    return await self._send_api_request(method, endpoint, json_data, params, headers, retry_count + 1)
                 else:
                     self.log(f"API request to {endpoint} failed with 429 after {self.max_retries} retries.")
                     raise # Re-raise if max retries exhausted
@@ -139,7 +139,7 @@ class ParasailNodeBot:
         # Using eth_account.messages.encode_defunct for personal_sign
         encoded_message = messages.encode_defunct(text=message_to_sign)
         signed_message = self.w3.eth.account.sign_message(encoded_message, private_key=self.private_key)
-        
+
         # The JS bot returns an object with address, msg, signature
         # We need to ensure the signature is hex format without '0x' if that's what API expects
         # Based on previous output, just signature.hex() should be fine, API will handle 0x
@@ -153,11 +153,11 @@ class ParasailNodeBot:
         self.log("Verifying user and obtaining bearer token...")
         try:
             signature_data = await self.generate_signature()
-            
+
             # The JS bot sends "signatureData" object directly to /auth/verify endpoint
-            # which aligns with `data` parameter in _send_api_request
-            response = await self._send_api_request('POST', '/user/verify', signature_data)
-            
+            # which aligns with `json_data` parameter in _send_api_request
+            response = await self._send_api_request('POST', '/user/verify', json_data=signature_data)
+
             self.config["bearer_token"] = response.get("token") # Note: JS uses 'token', not 'bearer_token' in response
             # self.config["wallet_address"] is already set and consistent by now
             self._save_config(self.config)
@@ -170,7 +170,7 @@ class ParasailNodeBot:
     async def onboard_node(self):
         self.log("Attempting to onboard node...")
         try:
-            response = await self._send_api_request('POST', '/v1/node/onboard', {"address": self.config["wallet_address"]})
+            response = await self._send_api_request('POST', '/v1/node/onboard', json_data={"address": self.config["wallet_address"]})
             self.log(f"Node onboarded successfully: {response.get('message', 'No message')}")
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
@@ -192,7 +192,7 @@ class ParasailNodeBot:
     async def check_in(self):
         self.log("Performing node check-in (power clicker equivalent)...")
         try:
-            response = await self._send_api_request('POST', '/v1/node/check_in', {"address": self.config["wallet_address"]})
+            response = await self._send_api_request('POST', '/v1/node/check_in', json_data={"address": self.config["wallet_address"]})
             self.log(f"Node checked in successfully. Points: {response.get('points', 'N/A')}, Message: {response.get('message', 'No message')}")
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
@@ -214,30 +214,15 @@ class ParasailNodeBot:
     async def get_node_stats(self):
         self.log("Fetching node stats...")
         try:
-            # JS uses /v1/node/node_stats with address as param, and Authorization header
-            stats = await self._send_api_request('GET', '/v1/node/node_stats', headers={"Accept": "application/json, text/plain, */*"}, data={"address": self.config["wallet_address"]}) # data= is for POST, for GET it's params
-            
-            # For GET requests with query parameters, requests.get takes 'params' not 'data'.
-            # Adjusting _send_api_request or explicitly call requests.get here with params.
-            # Let's adjust _send_api_request to handle 'params' for GET correctly.
-            # For now, will explicitly pass params in the call.
-            url = f"{BASE_URL}/v1/node/node_stats"
-            _headers = {"Content-Type": "application/json"}
-            if self.config.get("bearer_token"):
-                _headers["Authorization"] = f"Bearer {self.config['bearer_token']}"
-            
-            # Directly call requests.get with params for node stats
-            response = requests.get(url, params={"address": self.config["wallet_address"]}, headers=_headers, timeout=10)
-            response.raise_for_status()
-            stats = response.json()
-
+            # Now using _send_api_request with params for GET
+            stats = await self._send_api_request('GET', '/v1/node/node_stats', params={"address": self.config["wallet_address"]}, headers={"Accept": "application/json, text/plain, */*"})
 
             # The JS bot updates a UI, here we'll just log the key stats
             self.log(f"Node Stats - Has Node: {stats.get('has_node', 'N/A')}, Address: {stats.get('node_address', 'N/A')}, Points: {stats.get('points', 'N/A')}")
             self.log(f"Pending Rewards: {stats.get('pending_rewards', 'N/A')}, Total Distributed: {stats.get('total_distributed', 'N/A')}")
             self.log(f"Last Check-in: {time.ctime(stats['last_checkin_time']) if 'last_checkin_time' in stats and stats['last_checkin_time'] else 'N/A'}")
             self.log(f"Card Count: {stats.get('card_count', 'N/A')}")
-            
+
             return stats
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
@@ -284,7 +269,7 @@ class ParasailNodeBot:
         while self.countdown_remaining_seconds > 0:
             await asyncio.sleep(min(self.countdown_remaining_seconds, 60)) # Sleep up to 1 minute
             self.countdown_remaining_seconds -= min(self.countdown_remaining_seconds, 60)
-        
+
         self.log('Time to perform routine tasks!')
         await self.perform_routine_tasks()
 
