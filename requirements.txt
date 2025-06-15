@@ -1,6 +1,5 @@
 # Python Dependencies for Smart Contract and Browser Automation Bots
 web3
 python-dotenv
-py-solc-x
 eth-account
-playwright
+requests 
