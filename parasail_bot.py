@@ -1,96 +1,241 @@
 import asyncio
-from playwright.async_api import Playwright, async_playwright, expect
+import json
 import os
-from dotenv import load_dotenv
+import time
+import requests
+from web3 import Web3
+from eth_account import Account, messages
+from dotenv import load_dotenv # <-- New import
 
-# Load environment variables for potential wallet details
+# --- Load Environment Variables ---
 load_dotenv()
 
-async def run():
-    async with async_playwright() as playwright:
-        # Launch a Chromium browser in headless mode (no visible UI)
-        # Set headless=False if you want to see the browser window for debugging
-        browser = await playwright.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
+# --- Configuration Management ---
+CONFIG_FILE = 'config.json'
+BASE_URL = 'https://www.parasail.network/api'
 
-        print("Navigating to Parasail Network website...")
-        await page.goto("https://www.parasail.network")
-        print("Page loaded.")
+class ParasailNodeBot:
+    def __init__(self):
+        # Load dynamic config (wallet_address, bearer_token) from config.json
+        self.config = self._load_config()
 
-        # --- Attempt to find and click "Login With Wallet" ---
-        # This part is highly dependent on the website's actual HTML structure.
-        # You'll likely need to inspect the website's elements in a regular browser
-        # to find the exact selector for the "Login With Wallet" button.
+        # Load private key from .env file
+        self.private_key = os.getenv("PRIVATE_KEY")
+        if not self.private_key:
+            self.log("Error: PRIVATE_KEY not found in .env file.")
+            self.log("Please ensure your .env file is configured correctly.")
+            exit(1)
 
-        # Common selectors might be:
-        #   - A button with specific text: page.get_by_text("Login With Wallet")
-        #   - A button with a specific ID: page.locator("#loginButtonId")
-        #   - A button with a specific class: page.locator(".login-wallet-button")
+        self.w3 = Web3() # Web3 instance for signing
 
-        # Let's try by text first, as it's common.
-        # This will wait for the button to be visible and then click it.
+        # Initialize wallet with private key from .env
         try:
-            print("Looking for 'Login With Wallet' button...")
-            login_button = page.get_by_text("Login With Wallet", exact=True)
-            await login_button.wait_for(state="visible", timeout=10000) # Wait up to 10 seconds
-            await login_button.click()
-            print("Clicked 'Login With Wallet' button.")
+            self.wallet = Account.from_key(self.private_key)
+            # Ensure wallet_address in config.json is consistent with the private key
+            if self.config.get("wallet_address") != self.wallet.address:
+                self.config["wallet_address"] = self.wallet.address
+                self._save_config(self.config) # Save updated config
+        except Exception as e:
+            self.log(f"Error initializing wallet from PRIVATE_KEY: {e}")
+            self.log("Please ensure PRIVATE_KEY in .env is correct and has no '0x' prefix.")
+            exit(1)
 
-            # --- Critical Point: Wallet Interaction ---
-            # After clicking "Login With Wallet", a wallet extension (like MetaMask)
-            # usually pops up or redirects. Automating this interaction (entering password,
-            # approving connection, signing) is the *most challenging* part.
-            # Playwright itself doesn't directly control browser extensions.
+        self.log(f"Wallet Address: {self.config.get('wallet_address')}")
+        self.countdown_remaining_seconds = 0
+        self.countdown_task = None
+        self.stats_task = None
 
-            # You might need to:
-            # 1. Manually set up a browser profile with MetaMask pre-installed and logged in.
-            # 2. Use a Playwright feature that allows attaching to existing browser sessions (advanced).
-            # 3. Consider if the dApp offers a WalletConnect QR code, which *could* be scanned
-            #    by a separate mobile app, but this moves away from full automation.
-            # 4. Use a specialized library or custom script to interact with MetaMask's internal
-            #    pop-up window if it appears. This is complex and potentially risky.
+    def _load_config(self):
+        try:
+            if not os.path.exists(CONFIG_FILE):
+                # Create an empty config if it doesn't exist
+                initial_config = {
+                    "wallet_address": "",
+                    "bearer_token": ""
+                }
+                with open(CONFIG_FILE, 'w') as f:
+                    json.dump(initial_config, f, indent=2)
+                self.log(f"Created empty {CONFIG_FILE}.")
+                # Don't exit here, as private key is loaded from .env
+                return initial_config
 
-            print("\n--- WARNING: Wallet interaction needs manual handling or advanced setup ---")
-            print("After 'Login With Wallet' is clicked, a wallet extension (e.g., MetaMask)")
-            print("would typically pop up. Playwright cannot directly automate this securely.")
-            print("You will likely need to handle the wallet connection/signature manually initially,")
-            print("or research advanced methods for automating wallet extensions.")
+            with open(CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            self.log(f"Error loading config from {CONFIG_FILE}: {e}")
+            self.log("Please check if config.json is a valid JSON file.")
+            exit(1)
 
-            # Give it some time to see what happens after clicking
-            await page.wait_for_timeout(5000) # Wait 5 seconds to observe any pop-ups/redirects
+    def _save_config(self, config):
+        try:
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(config, f, indent=2)
+        except Exception as e:
+            self.log(f"Error saving config to {CONFIG_FILE}: {e}")
 
-            # --- After successful wallet login (hypothetically) ---
-            # Now, you'd look for "Activate Node" and "Power Clicker" buttons
-            # This again requires inspecting the webpage after login.
+    def log(self, message):
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        print(f"[{timestamp}] {message}")
 
-            # Example (assuming you're logged in and on the correct page)
-            # try:
-            #     print("Looking for 'Activate Node' button...")
-            #     activate_node_button = page.get_by_text("Activate Node", exact=True)
-            #     await activate_node_button.wait_for(state="visible", timeout=5000)
-            #     await activate_node_button.click()
-            #     print("Clicked 'Activate Node'.")
-            # except Exception as e:
-            #     print(f"Could not find or click 'Activate Node': {e}")
-            #
-            # try:
-            #     print("Looking for 'Power Clicker' button...")
-            #     power_clicker_button = page.get_by_text("Power Clicker", exact=True)
-            #     await power_clicker_button.wait_for(state="visible", timeout=5000)
-            #     # You might need to click this multiple times until stamina runs out
-            #     # This requires more complex logic to check stamina status.
-            #     await power_clicker_button.click()
-            #     print("Clicked 'Power Clicker'.")
-            # except Exception as e:
-            #     print(f"Could not find or click 'Power Clicker': {e}")
+    async def _send_api_request(self, method, endpoint, data=None, headers=None):
+        url = f"{BASE_URL}{endpoint}"
+        _headers = {"Content-Type": "application/json"}
+        if self.config.get("bearer_token"):
+            _headers["Authorization"] = f"Bearer {self.config['bearer_token']}"
+        if headers:
+            _headers.update(headers)
+
+        try:
+            if method == 'GET':
+                response = requests.get(url, headers=_headers)
+            elif method == 'POST':
+                response = requests.post(url, headers=_headers, json=data)
+            else:
+                raise ValueError(f"Unsupported HTTP method: {method}")
+
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            self.log(f"API request to {endpoint} failed: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                self.log(f"Response status: {e.response.status_code}")
+                self.log(f"Response body: {e.response.text}")
+            raise
+
+    async def generate_signature(self):
+        # The message to be signed is hardcoded in the JS bot.
+        message = (
+            "By signing this message, you confirm that you agree to the Parasail Terms of Service.\n\n"
+            "Parasail (including the Website and Parasail Smart Contracts) is not intended for:\n"
+            "(a) access and/or use by Excluded Persons;\n"
+            "(b) access and/or use by any person or entity in, or accessing or using the Website from, an Excluded Jurisdiction.\n\n"
+            "Excluded Persons are prohibited from accessing and/or using..."
+        )
+        # Using eth_account.messages.encode_defunct for personal_sign
+        encoded_message = messages.encode_defunct(text=message)
+        signed_message = self.w3.eth.account.sign_message(encoded_message, private_key=self.private_key)
+        return signed_message.signature.hex()
+
+    async def verify_user(self):
+        self.log("Verifying user and obtaining bearer token...")
+        try:
+            signature = await self.generate_signature()
+            data = {
+                "wallet_address": self.config["wallet_address"],
+                "signature": signature
+            }
+            response = await self._send_api_request('POST', '/auth/verify', data)
+            self.config["bearer_token"] = response.get("bearer_token")
+            self._save_config(self.config)
+            self.log("User verified. Bearer token obtained and saved.")
+            return True
+        except Exception as e:
+            self.log(f"User verification failed: {e}")
+            return False
+
+    async def onboard_node(self):
+        self.log("Attempting to onboard node...")
+        try:
+            response = await self._send_api_request('POST', '/node/onboard', {})
+            self.log(f"Node onboarded successfully: {response.get('message', 'No message')}")
+        except Exception as e:
+            self.log(f"Node onboarding failed: {e}")
+
+    async def check_in(self):
+        self.log("Performing node check-in (power clicker equivalent)...")
+        try:
+            response = await self._send_api_request('POST', '/node/checkin', {})
+            self.log(f"Node checked in successfully. Points: {response.get('points', 'N/A')}, Message: {response.get('message', 'No message')}")
+        except Exception as e:
+            self.log(f"Node check-in failed: {e}")
+
+    async def get_node_stats(self):
+        self.log("Fetching node stats...")
+        try:
+            stats = await self._send_api_request('GET', '/node/stats')
+            self.log(f"Node Stats - Tier: {stats.get('tier', 'N/A')}, Status: {stats.get('status', 'N/A')}, Total Points: {stats.get('total_points', 'N/A')}, Streak: {stats.get('streak', 'N/A')}")
+            self.log(f"Last Check-in: {stats.get('last_checkin', 'N/A')}")
+            return stats
+        except Exception as e:
+            self.log(f"Failed to fetch node stats: {e}")
+            return {}
+
+    async def start_countdown(self):
+        if self.countdown_task:
+            self.countdown_task.cancel()
+        if self.stats_task:
+            self.stats_task.cancel()
+
+        initial_stats = await self.get_node_stats()
+        if 'next_checkin_timestamp' in initial_stats and initial_stats['next_checkin_timestamp'] is not None:
+            next_checkin_ms = initial_stats['next_checkin_timestamp']
+            current_ms = time.time() * 1000
+            self.countdown_remaining_seconds = max(0, int((next_checkin_ms - current_ms) / 1000))
+            self.log(f"Next routine tasks in {self.countdown_remaining_seconds} seconds (approx. {self.countdown_remaining_seconds / 3600:.2f} hours).")
+        else:
+            self.log("Could not determine next check-in time from stats. Scheduling in 12 hours (fallback).")
+            self.countdown_remaining_seconds = 12 * 3600 # Fallback to 12 hours
+
+        self.countdown_task = asyncio.create_task(self._countdown_loop())
+        self.stats_task = asyncio.create_task(self._stats_update_loop())
+
+
+    async def _countdown_loop(self):
+        while self.countdown_remaining_seconds > 0:
+            await asyncio.sleep(min(self.countdown_remaining_seconds, 60))
+            self.countdown_remaining_seconds -= min(self.countdown_remaining_seconds, 60)
+        
+        self.log('Time to perform routine tasks!')
+        await self.perform_routine_tasks()
+
+
+    async def _stats_update_loop(self):
+        while True:
+            await asyncio.sleep(60) # Update every 60 seconds
+            try:
+                await self.get_node_stats()
+            except Exception as e:
+                self.log(f"Stats update loop failed: {e}")
+
+    async def perform_routine_tasks(self):
+        self.log("Performing routine tasks (onboard, check-in)...")
+        try:
+            await self.onboard_node()
+            await asyncio.sleep(2)
+            await self.check_in()
+            await asyncio.sleep(2)
+            await self.start_countdown() # Schedule next routine
+        except Exception as e:
+            self.log(f"Routine tasks failed: {e}")
+
+    async def start(self):
+        self.log("Starting Parasail Node Bot (Python equivalent)")
+        try:
+            if not self.config.get("bearer_token"):
+                self.log("No bearer token found. Attempting to verify user...")
+                success = await self.verify_user()
+                if not success:
+                    self.log("Failed to obtain bearer token. Please check private key and network connection.")
+                    return # Exit if we can't get token
+
+            # Initial tasks after ensuring token
+            await self.onboard_node()
+            await asyncio.sleep(2)
+            await self.check_in()
+            await asyncio.sleep(2)
+
+            await self.start_countdown() # Start the main operational loop
+
+            # Keep the bot running
+            while True:
+                await asyncio.sleep(3600) # Sleep for a long time, tasks are scheduled independently
 
         except Exception as e:
-            print(f"Could not find or click 'Login With Wallet' button or timed out: {e}")
-            print("Please inspect the webpage for the correct selector for the login button.")
+            self.log(f"Initialization failed: {e}")
 
-        print("Automation script finished.")
-        await browser.close()
+async def main():
+    bot = ParasailNodeBot()
+    await bot.start()
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    asyncio.run(main()) 
